@@ -1,0 +1,403 @@
+---
+title: "1- data organizing- prelim full model"
+output: html_document
+---
+---
+title: "Initial Full Model"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+output: html_document
+---
+
+Here is our first pass at running the full model. I included most of the code in the output just so everyone can see exactly what is happening under the hood (and maybe catch any mistakes and/or flaws in logic on my part). 
+```{r setup, include=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# install.packages("tidyverse")
+# install.packages("readr")
+# install.packages("here")
+# install.packages("tmle")
+# install.packages("gbm")
+# install.packages("earth")
+# install.packages("gam")
+# install.packages("arm")
+# install.packages("stats")
+# install.packages("ltmle")
+
+library(readr)
+library(here)
+library(tmle)
+library(gbm)
+library(earth)
+library(gam)
+library(arm)
+library(stats)
+library(ltmle)
+library(tidyverse)
+expit<-function(p){
+  exp(p)/(1+exp(p))
+}
+```
+
+
+```{r load files, include=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+dat <- read_csv(here("data", "partial_set_covonly_091719_plus_demo.csv"))
+
+# deal with some extreme outlier values that are probably messing up our estimates
+dat <- dat %>% 
+  mutate(
+    mn_bed_cut = if_else(mn_bed > 9, 9, mn_bed, mn_bed), 
+    mn_bed_perunit  = mn_bed / ct_units,
+    mn_bath_cut = if_else(mn_bath > 9, 9, mn_bath, mn_bath), 
+    mn_bath_perunit  = mn_bath / ct_units,
+    med_sale_cut = if_else(med_sale_res_5 >= 1000000,
+                                 1000000, med_sale_res_5,
+                                 med_sale_res_5), 
+    med_sale_perunit = med_sale_res_5 / ct_units, 
+
+  )
+
+```
+
+##### Recoding
+Some recoding to address missing values. 
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+dat2 <- dat %>% 
+  dplyr::select(-(`freq_`)) %>% 
+  mutate_at(vars(ct_par:tot_trans), ~if_else(is.na(.), 0, .))
+
+# for now, assuming missing any_liv is the same as any_liv==0
+dat3 <- dat2 %>% 
+  mutate(
+    mn_bed_perunit = case_when(is.na(mn_bed_perunit) & any_liv==1 ~ -999, 
+                       is.na(mn_bed_perunit) & is.na(any_liv) ~ -888,
+                       is.na(mn_bed_perunit) & any_liv == 0 ~ -888, 
+                       TRUE ~ mn_bed_perunit), 
+    bed888 = if_else(mn_bed_perunit == -888, 0, 1), 
+    bed999 = if_else(mn_bed_perunit == -999, 0, 1), 
+    
+    mn_bath_perunit = case_when(is.na(mn_bath_perunit) & any_liv==1 ~ -999, 
+                        is.na(mn_bath_perunit) & is.na(any_liv) ~ -888,
+                        is.na(mn_bath_perunit) & any_liv == 0 ~ -888, 
+                        TRUE ~ mn_bath_perunit), 
+    bath888 = if_else(mn_bath_perunit == -888, 0, 1), 
+    bath999 = if_else(mn_bath_perunit == -999, 0, 1), 
+    
+    per_brick = case_when(is.na(per_brick) & any_liv==1 ~ -999, 
+                          is.na(per_brick) & is.na(any_liv) ~ -888,
+                          is.na(per_brick) & any_liv == 0 ~ -888, 
+                          TRUE ~ per_brick), 
+    brick888 = if_else(per_brick == -888, 0, 1), 
+    brick999 = if_else(per_brick == -999, 0, 1), 
+    
+    per_singfam = case_when(is.na(per_singfam) & any_liv==1 ~ -999, 
+                            is.na(per_singfam) & is.na(any_liv) ~ -888,
+                            is.na(per_singfam) & any_liv == 0 ~ -888, 
+                            TRUE ~ per_singfam), 
+    singfam888 = if_else(per_singfam == -888, 0, 1), 
+    singfam999 = if_else(per_singfam == -999, 0, 1),
+    
+    per_com = case_when(is.na(per_com) & any_liv==1 ~ -999, 
+                        is.na(per_com) & is.na(any_liv) ~ -888,
+                        is.na(per_com) & any_liv == 0 ~ -888, 
+                        TRUE ~ per_com), 
+    com888 = if_else(per_com == -888, 0, 1), 
+    com999 = if_else(per_com == -999, 0, 1),
+    
+    per_ind = case_when(is.na(per_ind) & any_liv==1 ~ -999, 
+                        is.na(per_ind) & is.na(any_liv) ~ -888,
+                        is.na(per_ind) & any_liv == 0 ~ -888, 
+                        TRUE ~ per_ind), 
+    ind888 = if_else(per_ind == -888, 0, 1), 
+    ind999 = if_else(per_ind == -999, 0, 1),
+    
+    per_vc_lot = case_when(is.na(per_vc_lot) & any_liv==1 ~ -999, 
+                           is.na(per_vc_lot) & is.na(any_liv) ~ -888,
+                           is.na(per_vc_lot) & any_liv == 0 ~ -888, 
+                           TRUE ~ per_vc_lot), 
+    vc_lot888 = if_else(per_vc_lot == -888, 0, 1), 
+    vc_lot999 = if_else(per_vc_lot == -999, 0, 1), 
+    
+    med_age = case_when(is.na(med_age) & any_bldg == 1 ~ -999, 
+                        is.na(med_age) & is.na(any_bldg) ~ -888, 
+                        TRUE ~ med_age), 
+    med_age888 = if_else(med_age == -888, 0, 1), 
+    med_age999 = if_else(med_age == -999, 0, 1), 
+    
+    med_sale_perunit = case_when(is.na(med_sale_perunit) ~ -888, 
+                               TRUE ~ med_sale_perunit), 
+    med_sale888 = if_else(med_sale_perunit == -888, 0, 1))
+
+
+
+
+
+
+vc <- dat3 %>% 
+  select(hex_1000, year, pt1violence_densl2)
+
+vc2 <- vc %>% 
+  pivot_wider(values_from = pt1violence_densl2, 
+              names_from = year, 
+              names_prefix = "pt1v_dens")
+
+dat3 <- dat3 %>% 
+  left_join(vc2)
+
+rm(vc, vc2)
+
+
+
+
+```
+
+##### TMLE
+```{r, include=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+
+# interact all acs variables with anypop flag
+acs <- names(dat3[64:77])
+nn <- 0
+for (i in seq_along(acs)){
+  nn[i] <-paste0(acs[i], ":", "anypop")
+}
+
+acs2 <- str_c(nn, collapse =   " + ")
+
+```
+
+Put together the models: 
+
+* Treatment model: predict the probability of demolition in 2011 or 2012, given 2010 hexagon attributes
+    * note: demolition variables coded to indicate demolition in the previous year
+* Outcome model: estimate the number of part 1 violent crimes that would have occurred per hexagon in 2013, had there been no 2011-2012 demolition
+    * the outcome variable, pt1violence, is the count of all Violent Crime Index crimes (i.e., with and without a firearm)
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+
+dat4 <- dat3 %>% 
+  mutate(
+    demo1112 = if_else( demo2012 > 0 | demo2013 > 0, 1, 0), 
+    demo1213 = if_else( demo2013 > 0 | demo2014 > 0, 1, 0), 
+    demo1314 = if_else( demo2014 > 0 | demo2015 > 0, 1, 0), 
+    demo1415 = if_else( demo2015 > 0 | demo2016 > 0, 1, 0)
+    
+    )
+
+# drop hex_1000_unk- the bucket for all crimes of unknown location
+dat4 <- dat4 %>% 
+  filter(hex_1000 != "hex_1000_unk")
+
+
+# break into 2 sets of datasets (all hexagons, all hexagons with >0 parcels)- 
+# hex10 for baseline characteristics
+# hex13 for outcome statistics
+           
+# all 2958 hexagons
+hex10 <- dat4 %>% 
+  filter(year == 2010)
+
+# the 2624 hexagons with >0 parcels
+hex10x <- dat4 %>% 
+  filter(year == 2010, any_parcels == 1)
+
+
+hex13 <- dat4 %>% 
+  filter(year == 2013)
+hex13x <- dat4 %>% 
+  filter(year == 2013, any_parcels == 1)
+
+txmodel <- "demo1112 ~ mn_bed_perunit:bed888:bed999 + mn_bath_perunit:bath888:bath999 + per_brick:brick888:brick999 + per_singfam:singfam888:singfam999 + per_com:com888:com999 + per_ind:ind888:ind999 +  per_vc_lot:vc_lot888:vc_lot999 + med_age:med_age888:med_age999  + occ_manager:anypop + high:anypop + bs:anypop + pov:anypop + hh_pubasst:anypop + male:anypop + nhb:anypop + hisp:anypop + pop18to29:anypop + popls18:anypop + pop65p:anypop + single_hh:anypop + unemp:anypop + medinc:anypop + med_sale_perunit:med_sale888 + offprem_dens + pt1violence + pt1v_dens2010"
+
+
+
+```
+
+
+
+
+
+##### Model- all hexagons (n = 2957)
+
+###### estimate propensity score- predicted probability of any demolition in 2010-2012, given 2010 attributes
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+hex13$pscore <- predict(glm(formula=txmodel, data=hex10, family="binomial"), type="response")
+#practical positivity violations
+summary(hex13$pscore)
+
+```
+
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+#Create data set for ltmle. 
+#Order: W,A,Y
+datl <- hex13 %>%
+  dplyr::select(
+    c(
+      mn_bed_perunit,
+      bed888,
+      bed999,
+      mn_bath_perunit,
+      bath888,
+      bath999,
+      per_brick,
+      brick888,
+      brick999,
+      per_singfam,
+      singfam888,
+      singfam999,
+      per_com,
+      com888,
+      com999,
+      per_ind,
+      ind888,
+      ind999,
+      per_vc_lot,
+      vc_lot888,
+      vc_lot999,
+      med_age,
+      med_age888,
+      med_age999,
+      occ_manager,
+      anypop,
+      high,
+      bs,
+      pov,
+      hh_pubasst,
+      male,
+      nhb,
+      hisp,
+      pop18to29,
+      popls18,
+      pop65p,
+      single_hh,
+      unemp,
+      medinc,
+      offprem_dens,
+      med_sale_perunit,
+      med_sale888,
+      pt1v_dens2010,
+      pt1v_dens2011,
+      pt1v_dens2012,
+      demo1112,
+      pt1violence
+    )
+  )
+
+
+
+                
+#Run TMLE supplying weights
+gform <- array(c(hex13$pscore, 1 - hex13$pscore), dim = c(length(hex13$pscore), 1, 2))
+    
+#Run tmle
+tmlesupplyingwtsl<-ltmle(data = datl, Anodes = "demo1112", Lnodes = NULL, Ynodes = "pt1violence", Qform=c(pt1violence="Q.kplus1 ~ demo1112 + mn_bed_perunit:bed888:bed999 + mn_bath_perunit:bath888:bath999 + per_brick:brick888:brick999 + per_singfam:singfam888:singfam999 + per_com:com888:com999 + per_ind:ind888:ind999 +  per_vc_lot:vc_lot888:vc_lot999 + med_age:med_age888:med_age999  + occ_manager:anypop + high:anypop + bs:anypop + pov:anypop + hh_pubasst:anypop + male:anypop + nhb:anypop + hisp:anypop + pop18to29:anypop + popls18:anypop + pop65p:anypop + single_hh:anypop + unemp:anypop + medinc:anypop + offprem_dens + med_sale_perunit:med_sale888 + pt1v_dens2010 + pt1v_dens2011 + pt1v_dens2012"),gform = gform, abar = list(1,0))
+
+summary(tmlesupplyingwtsl)
+
+```
+
+
+```{r}
+mean(hex13$pt1violence)
+```
+
+Calculating the difference between what we observed (1.884004 crimes/hexagon) and the number of crimes/hexagon if there was no demolition in any hexagon (Control Estimate: 1.4353), our (current) model suggests that 2011 & 2012 demolitions were responsible for an additional .45 crimes per hexagon.
+<br>
+<br>
+
+
+##### Model- only hexagons with parcels (n = 2624)
+
+###### estimate propensity score- predicted probability of any demolition in 2010-2012, given 2010 attributes
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+#estimate propensity score
+hex13x$pscore <- predict(glm(formula=txmodel, data=hex10x, family="binomial"), type="response")
+#practical positivity violations
+summary(hex13x$pscore)
+
+```
+
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+ #Create data set for ltmle. 
+ #Order: W,A,Y
+datl <- hex13x %>%
+  dplyr::select(
+    c(
+      mn_bed_perunit,
+      bed888,
+      bed999,
+      mn_bath_perunit,
+      bath888,
+      bath999,
+      per_brick,
+      brick888,
+      brick999,
+      per_singfam,
+      singfam888,
+      singfam999,
+      per_com,
+      com888,
+      com999,
+      per_ind,
+      ind888,
+      ind999,
+      per_vc_lot,
+      vc_lot888,
+      vc_lot999,
+      med_age,
+      med_age888,
+      med_age999,
+      occ_manager,
+      anypop,
+      high,
+      bs,
+      pov,
+      hh_pubasst,
+      male,
+      nhb,
+      hisp,
+      pop18to29,
+      popls18,
+      pop65p,
+      single_hh,
+      unemp,
+      medinc,
+      offprem_dens,
+      med_sale_perunit,
+      med_sale888,
+      pt1v_dens2010,
+      pt1v_dens2011,
+      pt1v_dens2012,
+      demo1112,
+      pt1violence
+    )
+  )
+
+
+                
+#Run TMLE supplying weights
+gform <- array(c(hex13x$pscore, 1 - hex13x$pscore), dim = c(length(hex13x$pscore), 1, 2))
+    
+#Run tmle
+tmlesupplyingwtsl<-ltmle(data = datl, Anodes = "demo1112", Lnodes = NULL, Ynodes = "pt1violence", Qform=c(pt1violence="Q.kplus1 ~ demo1112 + mn_bed_perunit:bed888:bed999 + mn_bath_perunit:bath888:bath999 + per_brick:brick888:brick999 + per_singfam:singfam888:singfam999 + per_com:com888:com999 + per_ind:ind888:ind999 +  per_vc_lot:vc_lot888:vc_lot999 + med_age:med_age888:med_age999  + occ_manager:anypop + high:anypop + bs:anypop + pov:anypop + hh_pubasst:anypop + male:anypop + nhb:anypop + hisp:anypop + pop18to29:anypop + popls18:anypop + pop65p:anypop + single_hh:anypop + unemp:anypop + medinc:anypop + offprem_dens + med_sale_perunit:med_sale888 + pt1v_dens2010 + pt1v_dens2011 + pt1v_dens2012" ),gform = gform, abar = list(1,0))
+
+summary(tmlesupplyingwtsl)
+
+```
+
+The observed number of Pt.1 Violent crimes in 2013: 
+
+```{r}
+mean(hex13x$pt1violence)
+
+```
+
+
+Our (current) model suggests that 2011 & 2012 demolitions were responsible for an additional .5 crimes per hexagon.
